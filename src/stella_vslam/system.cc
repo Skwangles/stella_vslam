@@ -29,6 +29,34 @@
 
 namespace stella_vslam {
 
+
+
+bool system::feed_monocular_frame_bool(const cv::Mat& img, const double timestamp, const cv::Mat& mask) {
+    // Check if reset is requested before processing
+
+    check_reset_request();
+
+    // Ensure the camera setup is monocular
+    assert(camera_->setup_type_ == camera::setup_type_t::Monocular);
+
+    // Handle case where input image is empty
+    if (img.empty()) {
+        spdlog::warn("feed_monocular_frame: empty image");
+        return false;
+    }
+
+    data::frame frm = create_monocular_frame(img, timestamp, mask);
+
+
+    // Feed the created frame to the system
+    return tracker_->feed_frame_and_return_is_keyframe(frm);
+}
+
+
+
+
+
+
 system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file_path)
     : cfg_(cfg) {
     spdlog::debug("CONSTRUCT: system");
