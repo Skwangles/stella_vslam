@@ -47,7 +47,7 @@ int system::feed_monocular_frame_int(const cv::Mat& img, const double timestamp,
 
 
     // Feed the created frame to the system
-    return tracker_->feed_frame_and_return_keyframe_int(frm);
+    return tracker_->feed_frame_and_return_is_keyframe_int(frm);
 }
 
 
