@@ -259,7 +259,6 @@ bool system::load_map_database(const std::string& path) const {
     bool ok = map_database_io_->load(path, cam_db_, orb_params_db_, map_db_, bow_db_, bow_vocab_);
     auto keyfrms = map_db_->get_all_keyframes();
 
-    int max_id = -1;
 
     for (const auto& keyfrm : keyfrms) {
         keyfrm->frm_obs_.num_grid_cols_ = num_grid_cols_;
@@ -267,14 +266,9 @@ bool system::load_map_database(const std::string& path) const {
         data::assign_keypoints_to_grid(keyfrm->camera_, keyfrm->frm_obs_.undist_keypts_, keyfrm->frm_obs_.keypt_indices_in_cells_,
                                        keyfrm->frm_obs_.num_grid_cols_, keyfrm->frm_obs_.num_grid_rows_);
 
-        if (keyfrm->id_ > max_id){
-            max_id = keyfrm->id;
         }
     }
 
-    if (next_frame_id_ == 0) {
-        next_frame_id_ = max_id + 1;
-    }
 
     resume_other_threads();
     return ok;
@@ -384,7 +378,6 @@ data::frame system::create_monocular_frame(const cv::Mat& img, const double time
     if (marker_detector_) {
         marker_detector_->detect(img_gray, markers_2d);
     }
-
     return data::frame(next_frame_id_++, timestamp, camera_, orb_params_, frm_obs, std::move(markers_2d));
 }
 
@@ -402,36 +395,6 @@ std::shared_ptr<Mat44_t> system::feed_monocular_frame(const cv::Mat& img, const 
     const auto end = std::chrono::system_clock::now();
     double extraction_time_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     return feed_frame(frm, img, extraction_time_elapsed_ms);
-}
-
-std::shared_ptr<Mat44_t> system::feed_stereo_frame(const cv::Mat& left_img, const cv::Mat& right_img, const double timestamp, const cv::Mat& mask) {
-    check_reset_request();
-
-    assert(camera_->setup_type_ == camera::setup_type_t::Stereo);
-    if (left_img.empty() || right_img.empty()) {
-        spdlog::warn("preprocess: empty image");
-        return nullptr;
-    }
-    const auto start = std::chrono::system_clock::now();
-    auto frm = create_stereo_frame(left_img, right_img, timestamp, mask);
-    const auto end = std::chrono::system_clock::now();
-    double extraction_time_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    return feed_frame(frm, left_img, extraction_time_elapsed_ms);
-}
-
-std::shared_ptr<Mat44_t> system::feed_RGBD_frame(const cv::Mat& rgb_img, const cv::Mat& depthmap, const double timestamp, const cv::Mat& mask) {
-    check_reset_request();
-
-    assert(camera_->setup_type_ == camera::setup_type_t::RGBD);
-    if (rgb_img.empty() || depthmap.empty()) {
-        spdlog::warn("preprocess: empty image");
-        return nullptr;
-    }
-    const auto start = std::chrono::system_clock::now();
-    auto frm = create_RGBD_frame(rgb_img, depthmap, timestamp, mask);
-    const auto end = std::chrono::system_clock::now();
-    double extraction_time_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    return feed_frame(frm, rgb_img, extraction_time_elapsed_ms);
 }
 
 std::shared_ptr<Mat44_t> system::feed_frame(const data::frame& frm, const cv::Mat& img, const double extraction_time_elapsed_ms) {
