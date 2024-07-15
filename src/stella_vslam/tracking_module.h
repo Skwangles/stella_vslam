@@ -46,9 +46,6 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     bool feed_frame_and_return_is_keyframe(data::frame curr_frm);
-    int feed_frame_and_return_is_keyframe_int(data::frame curr_frm);
-
-
 
     //! Constructor
     tracking_module(const std::shared_ptr<config>& cfg, camera::base* camera, data::map_database* map_db,

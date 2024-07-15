@@ -40,6 +40,7 @@ int system::feed_monocular_frame_int(const cv::Mat& img, const double timestamp,
     // Handle case where input image is empty
     if (img.empty()) {
         spdlog::warn("feed_monocular_frame: empty image");
+        throw std::invalid_argument("Empty image frame passed");
         return -1;
     }
 
@@ -47,7 +48,7 @@ int system::feed_monocular_frame_int(const cv::Mat& img, const double timestamp,
 
 
     // Feed the created frame to the system
-    return tracker_->feed_frame_and_return_is_keyframe_int(frm);
+    return tracker_->feed_frame_and_return_is_keyframe(frm) ? frm.id_ : -1;
 }
 
 
@@ -62,6 +63,7 @@ bool system::feed_monocular_frame_bool(const cv::Mat& img, const double timestam
     // Handle case where input image is empty
     if (img.empty()) {
         spdlog::warn("feed_monocular_frame: empty image");
+        throw std::invalid_argument("Empty image frame passed");
         return false;
     }
 
@@ -256,12 +258,24 @@ bool system::load_map_database(const std::string& path) const {
     spdlog::debug("load_map_database: {}", path);
     bool ok = map_database_io_->load(path, cam_db_, orb_params_db_, map_db_, bow_db_, bow_vocab_);
     auto keyfrms = map_db_->get_all_keyframes();
+
+    int max_id = -1;
+
     for (const auto& keyfrm : keyfrms) {
         keyfrm->frm_obs_.num_grid_cols_ = num_grid_cols_;
         keyfrm->frm_obs_.num_grid_rows_ = num_grid_rows_;
         data::assign_keypoints_to_grid(keyfrm->camera_, keyfrm->frm_obs_.undist_keypts_, keyfrm->frm_obs_.keypt_indices_in_cells_,
                                        keyfrm->frm_obs_.num_grid_cols_, keyfrm->frm_obs_.num_grid_rows_);
+
+        if (keyfrm->id_ > max_id){
+            max_id = keyfrm->id;
+        }
     }
+
+    if (next_frame_id_ == 0) {
+        next_frame_id_ = max_id + 1;
+    }
+
     resume_other_threads();
     return ok;
 }
@@ -374,131 +388,6 @@ data::frame system::create_monocular_frame(const cv::Mat& img, const double time
     return data::frame(next_frame_id_++, timestamp, camera_, orb_params_, frm_obs, std::move(markers_2d));
 }
 
-data::frame system::create_stereo_frame(const cv::Mat& left_img, const cv::Mat& right_img, const double timestamp, const cv::Mat& mask) {
-    // color conversion
-    if (!camera_->is_valid_shape(left_img)) {
-        spdlog::warn("preprocess: Input image size is invalid");
-    }
-    if (!camera_->is_valid_shape(right_img)) {
-        spdlog::warn("preprocess: Input image size is invalid");
-    }
-    cv::Mat img_gray = left_img;
-    cv::Mat right_img_gray = right_img;
-    util::convert_to_grayscale(img_gray, camera_->color_order_);
-    util::convert_to_grayscale(right_img_gray, camera_->color_order_);
-
-    data::frame_observation frm_obs;
-    //! keypoints of stereo right image
-    std::vector<cv::KeyPoint> keypts_right;
-    //! ORB descriptors of stereo right image
-    cv::Mat descriptors_right;
-
-    // Extract ORB feature
-    keypts_.clear();
-    std::thread thread_left([this, &frm_obs, &img_gray, &mask]() {
-        extractor_left_->extract(img_gray, mask, keypts_, frm_obs.descriptors_);
-    });
-    std::thread thread_right([this, &frm_obs, &right_img_gray, &mask, &keypts_right, &descriptors_right]() {
-        extractor_right_->extract(right_img_gray, mask, keypts_right, descriptors_right);
-    });
-    thread_left.join();
-    thread_right.join();
-    if (keypts_.empty()) {
-        spdlog::warn("preprocess: cannot extract any keypoints");
-    }
-
-    // Undistort keypoints
-    camera_->undistort_keypoints(keypts_, frm_obs.undist_keypts_);
-
-    // Estimate depth with stereo match
-    match::stereo stereo_matcher(extractor_left_->image_pyramid_, extractor_right_->image_pyramid_,
-                                 keypts_, keypts_right, frm_obs.descriptors_, descriptors_right,
-                                 orb_params_->scale_factors_, orb_params_->inv_scale_factors_,
-                                 camera_->focal_x_baseline_, camera_->true_baseline_);
-    stereo_matcher.compute(frm_obs.stereo_x_right_, frm_obs.depths_);
-
-    // Convert to bearing vector
-    camera_->convert_keypoints_to_bearings(frm_obs.undist_keypts_, frm_obs.bearings_);
-
-    // Assign all the keypoints into grid
-    frm_obs.num_grid_cols_ = num_grid_cols_;
-    frm_obs.num_grid_rows_ = num_grid_rows_;
-    data::assign_keypoints_to_grid(camera_, frm_obs.undist_keypts_, frm_obs.keypt_indices_in_cells_,
-                                   frm_obs.num_grid_cols_, frm_obs.num_grid_rows_);
-
-    // Detect marker
-    std::unordered_map<unsigned int, data::marker2d> markers_2d;
-    if (marker_detector_) {
-        marker_detector_->detect(img_gray, markers_2d);
-    }
-
-    return data::frame(next_frame_id_++, timestamp, camera_, orb_params_, frm_obs, std::move(markers_2d));
-}
-
-data::frame system::create_RGBD_frame(const cv::Mat& rgb_img, const cv::Mat& depthmap, const double timestamp, const cv::Mat& mask) {
-    // color and depth scale conversion
-    if (!camera_->is_valid_shape(rgb_img)) {
-        spdlog::warn("preprocess: Input image size is invalid");
-    }
-    if (!camera_->is_valid_shape(depthmap)) {
-        spdlog::warn("preprocess: Input image size is invalid");
-    }
-    cv::Mat img_gray = rgb_img;
-    cv::Mat img_depth = depthmap;
-    util::convert_to_grayscale(img_gray, camera_->color_order_);
-    util::convert_to_true_depth(img_depth, depthmap_factor_);
-
-    data::frame_observation frm_obs;
-
-    // Extract ORB feature
-    keypts_.clear();
-    extractor_left_->extract(img_gray, mask, keypts_, frm_obs.descriptors_);
-    if (keypts_.empty()) {
-        spdlog::warn("preprocess: cannot extract any keypoints");
-    }
-
-    // Undistort keypoints
-    camera_->undistort_keypoints(keypts_, frm_obs.undist_keypts_);
-
-    // Calculate disparity from depth
-    // Initialize with invalid value
-    frm_obs.stereo_x_right_ = std::vector<float>(frm_obs.undist_keypts_.size(), -1);
-    frm_obs.depths_ = std::vector<float>(frm_obs.undist_keypts_.size(), -1);
-
-    for (unsigned int idx = 0; idx < frm_obs.undist_keypts_.size(); idx++) {
-        const auto& keypt = keypts_.at(idx);
-        const auto& undist_keypt = frm_obs.undist_keypts_.at(idx);
-
-        const float x = keypt.pt.x;
-        const float y = keypt.pt.y;
-
-        const float depth = img_depth.at<float>(y, x);
-
-        if (depth <= 0) {
-            continue;
-        }
-
-        frm_obs.depths_.at(idx) = depth;
-        frm_obs.stereo_x_right_.at(idx) = undist_keypt.pt.x - camera_->focal_x_baseline_ / depth;
-    }
-
-    // Convert to bearing vector
-    camera_->convert_keypoints_to_bearings(frm_obs.undist_keypts_, frm_obs.bearings_);
-
-    // Assign all the keypoints into grid
-    frm_obs.num_grid_cols_ = num_grid_cols_;
-    frm_obs.num_grid_rows_ = num_grid_rows_;
-    data::assign_keypoints_to_grid(camera_, frm_obs.undist_keypts_, frm_obs.keypt_indices_in_cells_,
-                                   frm_obs.num_grid_cols_, frm_obs.num_grid_rows_);
-
-    // Detect marker
-    std::unordered_map<unsigned int, data::marker2d> markers_2d;
-    if (marker_detector_) {
-        marker_detector_->detect(img_gray, markers_2d);
-    }
-
-    return data::frame(next_frame_id_++, timestamp, camera_, orb_params_, frm_obs, std::move(markers_2d));
-}
 
 std::shared_ptr<Mat44_t> system::feed_monocular_frame(const cv::Mat& img, const double timestamp, const cv::Mat& mask) {
     check_reset_request();
