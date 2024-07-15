@@ -55,6 +55,8 @@ public:
 
     bool feed_monocular_frame_bool(const cv::Mat& img, const double timestamp, const cv::Mat& mask = cv::Mat{});
 
+    int feed_monocular_frame_int(const cv::Mat& img, const double timestamp, const cv::Mat& mask = cv::Mat{});
+
     //! Constructor
     system(const std::shared_ptr<config>& cfg, const std::string& vocab_file_path);
 
