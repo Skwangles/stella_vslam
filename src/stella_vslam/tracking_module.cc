@@ -19,6 +19,93 @@
 
 namespace stella_vslam {
 
+
+bool tracking_module::feed_frame_and_return_is_keyframe(data::frame curr_frm) {
+    // check if pause is requested
+    pause_if_requested();
+    while (is_paused()) {
+        std::this_thread::sleep_for(std::chrono::microseconds(5000));
+    }
+
+    curr_frm_ = curr_frm;
+
+    bool is_keyframe = false;
+    bool succeeded = false;
+    if (tracking_state_ == tracker_state_t::Initializing) {
+        succeeded = initialize();
+    }
+    else {
+        std::lock_guard<std::mutex> lock(mtx_stop_keyframe_insertion_);
+        bool relocalization_is_needed = tracking_state_ == tracker_state_t::Lost;
+        SPDLOG_TRACE("tracking_module: start tracking");
+        unsigned int num_tracked_lms = 0;
+        unsigned int num_reliable_lms = 0;
+        const unsigned int min_num_obs_thr = (3 <= map_db_->get_num_keyframes()) ? 3 : 2;
+        succeeded = track(relocalization_is_needed, num_tracked_lms, num_reliable_lms, min_num_obs_thr);
+
+        // check to insert the new keyframe derived from the current frame
+        if (succeeded && !is_stopped_keyframe_insertion_ && new_keyframe_is_needed(num_tracked_lms, num_reliable_lms, min_num_obs_thr)) {
+            is_keyframe = true;
+            keyfrm_inserter_.insert_new_keyframe(map_db_, curr_frm_);
+        }
+    }
+
+    // state transition
+    if (succeeded) {
+        tracking_state_ = tracker_state_t::Tracking;
+    }
+    else if (tracking_state_ == tracker_state_t::Tracking) {
+        tracking_state_ = tracker_state_t::Lost;
+
+        spdlog::info("tracking lost: frame {}", curr_frm_.id_);
+        // if tracking is failed within init_retry_threshold_time_ sec after initialization, reset the system
+        if (!mapper_->is_paused() && curr_frm_.timestamp_ - initializer_.get_initial_frame_timestamp() < init_retry_threshold_time_) {
+            spdlog::info("tracking lost within {} sec after initialization", init_retry_threshold_time_);
+            reset();
+            return false;
+        }
+    }
+
+    std::shared_ptr<Mat44_t> cam_pose_wc = nullptr;
+    // store the relative pose from the reference keyframe to the current frame
+    // to update the camera pose at the beginning of the next tracking process
+    if (curr_frm_.pose_is_valid()) {
+        last_cam_pose_from_ref_keyfrm_ = curr_frm_.get_pose_cw() * curr_frm_.ref_keyfrm_->get_pose_wc();
+        cam_pose_wc = std::allocate_shared<Mat44_t>(Eigen::aligned_allocator<Mat44_t>(), curr_frm_.get_pose_wc());
+    }
+
+    // update last frame
+    SPDLOG_TRACE("tracking_module: update last frame (curr_frm_={})", curr_frm_.id_);
+    {
+        std::lock_guard<std::mutex> lock(mtx_last_frm_);
+        last_frm_ = curr_frm_;
+    }
+    SPDLOG_TRACE("tracking_module: finish tracking");
+
+    return is_keyframe;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 tracking_module::tracking_module(const std::shared_ptr<config>& cfg, camera::base* camera, data::map_database* map_db,
                                  data::bow_vocabulary* bow_vocab, data::bow_database* bow_db)
     : camera_(camera),

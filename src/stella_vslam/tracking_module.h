@@ -45,6 +45,9 @@ class tracking_module {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    bool feed_frame_and_return_is_keyframe(data::frame curr_frm);
+
+
     //! Constructor
     tracking_module(const std::shared_ptr<config>& cfg, camera::base* camera, data::map_database* map_db,
                     data::bow_vocabulary* bow_vocab, data::bow_database* bow_db);
