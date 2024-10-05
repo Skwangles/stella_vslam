@@ -1,3 +1,12 @@
+# CampusVirtual changes
+
+- The tracking_module.cc and tracking_module.h files have new functions added which instead of returning the fed frame's current position, returns a boolean whether the current frame is saved as a keyframe.
+- The system.cc and system.h files have new functions which use the new tracking_module.cc function and also return a boolean whether corresponding frame is a keyframe, so that a custom controlling program (based on stella_vslam_examples run_video_vslam.cc) can save the video if saved as a keyframe.
+
+
+
+
+
 # stella_vslam
 
 [![CI](https://github.com/stella-cv/stella_vslam/actions/workflows/main.yml/badge.svg)](https://github.com/stella-cv/stella_vslam/actions/workflows/main.yml)
