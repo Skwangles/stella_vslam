@@ -92,8 +92,13 @@ system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file
     print_info();
 
     // load ORB vocabulary
-    spdlog::info("loading ORB vocabulary: {}", vocab_file_path);
-    bow_vocab_ = data::bow_vocabulary_util::load(vocab_file_path);
+    if (!vocab_file_path.empty()) {
+        spdlog::info("loading ORB vocabulary: {}", vocab_file_path);
+        bow_vocab_ = data::bow_vocabulary_util::load(vocab_file_path);
+    }
+    else {
+        spdlog::debug("Running without vocabulary");
+    }
 
     const auto system_params = util::yaml_optional_ref(cfg->yaml_node_, "System");
 
@@ -105,7 +110,9 @@ system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file
     cam_db_ = new data::camera_database();
     cam_db_->add_camera(camera_);
     map_db_ = new data::map_database(system_params["min_num_shared_lms"].as<unsigned int>(15));
-    bow_db_ = new data::bow_database(bow_vocab_);
+    if (bow_vocab_) {
+        bow_db_ = new data::bow_database(bow_vocab_);
+    }
     orb_params_db_ = new data::orb_params_database();
     orb_params_db_->add_orb_params(orb_params_);
 
@@ -122,7 +129,9 @@ system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file
     // mapping module
     mapper_ = new mapping_module(util::yaml_optional_ref(cfg->yaml_node_, "Mapping"), map_db_, bow_db_, bow_vocab_);
     // global optimization module
-    global_optimizer_ = new global_optimization_module(map_db_, bow_db_, bow_vocab_, cfg_->yaml_node_, camera_->setup_type_ != camera::setup_type_t::Monocular);
+    if (bow_db_ && bow_vocab_) {
+        global_optimizer_ = new global_optimization_module(map_db_, bow_db_, bow_vocab_, cfg_->yaml_node_, camera_->setup_type_ != camera::setup_type_t::Monocular);
+    }
 
     // preprocessing modules
     const auto preprocessing_params = util::yaml_optional_ref(cfg->yaml_node_, "Preprocessing");
@@ -135,9 +144,11 @@ system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file
     auto mask_rectangles = util::get_rectangles(preprocessing_params["mask_rectangles"]);
 
     const auto min_size = preprocessing_params["min_size"].as<unsigned int>(800);
-    extractor_left_ = new feature::orb_extractor(orb_params_, min_size, mask_rectangles);
+    const auto desc_type_str = preprocessing_params["descriptor_type"].as<std::string>("ORB");
+    const auto desc_type = feature::descriptor_type_from_string(desc_type_str);
+    extractor_left_ = new feature::orb_extractor(orb_params_, min_size, desc_type, mask_rectangles);
     if (camera_->setup_type_ == camera::setup_type_t::Stereo) {
-        extractor_right_ = new feature::orb_extractor(orb_params_, min_size, mask_rectangles);
+        extractor_right_ = new feature::orb_extractor(orb_params_, min_size, desc_type, mask_rectangles);
     }
 
     num_grid_cols_ = preprocessing_params["num_grid_cols"].as<unsigned int>(64);
@@ -166,17 +177,21 @@ system::system(const std::shared_ptr<config>& cfg, const std::string& vocab_file
 
     // connect modules each other
     tracker_->set_mapping_module(mapper_);
-    tracker_->set_global_optimization_module(global_optimizer_);
     mapper_->set_tracking_module(tracker_);
-    mapper_->set_global_optimization_module(global_optimizer_);
-    global_optimizer_->set_tracking_module(tracker_);
-    global_optimizer_->set_mapping_module(mapper_);
+    if (global_optimizer_) {
+        tracker_->set_global_optimization_module(global_optimizer_);
+        mapper_->set_global_optimization_module(global_optimizer_);
+        global_optimizer_->set_tracking_module(tracker_);
+        global_optimizer_->set_mapping_module(mapper_);
+    }
 }
 
 system::~system() {
     global_optimization_thread_.reset(nullptr);
-    delete global_optimizer_;
-    global_optimizer_ = nullptr;
+    if (global_optimizer_) {
+        delete global_optimizer_;
+        global_optimizer_ = nullptr;
+    }
 
     mapping_thread_.reset(nullptr);
     delete mapper_;
@@ -191,8 +206,10 @@ system::~system() {
     map_db_ = nullptr;
     delete cam_db_;
     cam_db_ = nullptr;
-    delete bow_vocab_;
-    bow_vocab_ = nullptr;
+    if (bow_vocab_) {
+        delete bow_vocab_;
+        bow_vocab_ = nullptr;
+    }
 
     delete extractor_left_;
     extractor_left_ = nullptr;
@@ -239,19 +256,29 @@ void system::startup(const bool need_initialize) {
     }
 
     mapping_thread_ = std::unique_ptr<std::thread>(new std::thread(&stella_vslam::mapping_module::run, mapper_));
-    global_optimization_thread_ = std::unique_ptr<std::thread>(new std::thread(&stella_vslam::global_optimization_module::run, global_optimizer_));
+    if (global_optimizer_) {
+        global_optimization_thread_ = std::unique_ptr<std::thread>(new std::thread(&stella_vslam::global_optimization_module::run, global_optimizer_));
+    }
 }
 
 void system::shutdown() {
     // terminate the other threads
-    auto future_mapper_terminate = mapper_->async_terminate();
-    auto future_global_optimizer_terminate = global_optimizer_->async_terminate();
-    future_mapper_terminate.get();
-    future_global_optimizer_terminate.get();
+    if (global_optimizer_) {
+        auto future_mapper_terminate = mapper_->async_terminate();
+        auto future_global_optimizer_terminate = global_optimizer_->async_terminate();
+        future_mapper_terminate.get();
+        future_global_optimizer_terminate.get();
+    }
+    else {
+        auto future_mapper_terminate = mapper_->async_terminate();
+        future_mapper_terminate.get();
+    }
 
     // wait until the threads stop
     mapping_thread_->join();
-    global_optimization_thread_->join();
+    if (global_optimization_thread_) {
+        global_optimization_thread_->join();
+    }
 
     spdlog::info("shutdown SLAM system");
     system_is_running_ = false;
@@ -355,28 +382,34 @@ bool system::mapping_module_is_enabled() const {
 
 void system::enable_loop_detector() {
     std::lock_guard<std::mutex> lock(mtx_loop_detector_);
-    global_optimizer_->enable_loop_detector();
+    if (global_optimizer_) {
+        global_optimizer_->enable_loop_detector();
+    }
 }
 
 void system::disable_loop_detector() {
     std::lock_guard<std::mutex> lock(mtx_loop_detector_);
-    global_optimizer_->disable_loop_detector();
+    if (global_optimizer_) {
+        global_optimizer_->disable_loop_detector();
+    }
 }
 
 bool system::loop_detector_is_enabled() const {
-    return global_optimizer_->loop_detector_is_enabled();
+    return global_optimizer_ && global_optimizer_->loop_detector_is_enabled();
 }
 
 bool system::request_loop_closure(int keyfrm1_id, int keyfrm2_id) {
-    return global_optimizer_->request_loop_closure(keyfrm1_id, keyfrm2_id);
+    return global_optimizer_ && global_optimizer_->request_loop_closure(keyfrm1_id, keyfrm2_id);
 }
 
 bool system::loop_BA_is_running() const {
-    return global_optimizer_->loop_BA_is_running();
+    return global_optimizer_ && global_optimizer_->loop_BA_is_running();
 }
 
 void system::abort_loop_BA() {
-    global_optimizer_->abort_loop_BA();
+    if (global_optimizer_) {
+        global_optimizer_->abort_loop_BA();
+    }
 }
 
 void system::enable_temporal_mapping() {
